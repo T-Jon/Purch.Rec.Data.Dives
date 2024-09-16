@@ -1,0 +1,216 @@
+-- TracRite>Optimum Control Inventory Measurement Tool
+-- Output:
+  -- Item Description, Internal Item ID, Recent Supplier, Supplier Order Code, Inv. Category Name, Item Storage Location, Reporting UOM, Opening Inv, Purchase Qty, X-Fer In Qty, X-Fer Out Qty, Waste Qty, Ending Inv Qty, Usage Qty. Purchase Value, End Inv. Value
+
+-- Store ID Values
+  -- 8	Banquets
+  -- 1	Cabinet
+  -- 7	C-Rock
+  -- 3	Crow's Ben
+  -- 13	Gourmandie
+  -- 9	Lakeview
+  -- 14	Mojo
+  -- 12	Outback
+  -- 2	Warehouse
+  -- 11	Rowdy
+  -- 4	Sky House
+  -- 10	Taps
+
+-- Set transaction isolation level and prevent extra result sets
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET NOCOUNT ON;
+
+-- Declare variables to filter the data
+DECLARE @Store SMALLINT = 2;              -- Store ID Value for filtering the data 
+DECLARE @StartDate DATETIME = '2024-08-01'; -- Start date for the reporting period
+DECLARE @EndDate DATETIME = '2024-08-31';   -- End date for the reporting period
+
+-- Declare a temporary table to hold the summary data
+DECLARE @UsageSummary TABLE (
+    ItemDescrip NVARCHAR(50),  -- Item Description
+    ItemId INTEGER,             -- OC Item ID
+    Supplier NVARCHAR(50),      -- Supplier Name
+    OrderCode NVARCHAR(50),     -- Order Code
+    Category_Name NVARCHAR(50), -- Category Name
+    Item_Location NVARCHAR(50), -- Primary Location Name
+    UOM NVARCHAR(17),          -- Unit of Measure (UOM)
+    OpenInvQty DECIMAL(14, 3), -- Opening Inventory Quantity
+    PurchaseQty DECIMAL(14, 3),-- Period Purchase Quantity
+    TransferOutQty DECIMAL(14, 3), -- Transfer Out Quantity
+    TransferInQty DECIMAL(14, 3), -- Transfer In Quantity
+    WasteQty DECIMAL(14, 3), -- Waste Quantity
+    EndInvQty DECIMAL(14, 3),  -- Ending Inventory Quantity
+    UsageQty DECIMAL(14, 3),   -- Actual Usage Quantity
+    ApproxValue DECIMAL(15, 4),-- Approximate Value (calculated using average cost)
+    EndInvValue DECIMAL(15, 4) -- Ending Inventory Value
+);
+
+-- Insert data into the temporary table from various inventory and item-related tables
+INSERT INTO @UsageSummary
+SELECT 
+    i.Descrip AS ItemDescrip,       -- Description of the item
+    i.ItemId,                         -- OC Item ID 
+    ISNULL(recentSupplier.SupplierName, 'Unknown') AS Supplier, -- Supplier Name filtered by condition *****
+    ISNULL(cs.OrderCode, 'N/A') AS OrderCode,       -- Order Code or N/A if blank *****
+    c.Name AS Category_Name,        -- Category Name from Category table
+    l.Name AS Item_Location,        -- Primary Location Name from Location table
+    u.Descrip AS UOM,               -- Unit of Measure Description
+    -- Opening Inventory in the Reporting Unit
+    ISNULL(insu_open.QtyOnHand, 0) / icf.ReportingConversionFactor 
+    + ISNULL(insu_open.PreppedQty, 0) / icf.ReportingConversionFactor AS OpenInvQty,
+    -- Period Purchase Quantity in the Reporting Unit
+    ISNULL(ui.InvoiceSum, 0) / icf.ReportingConversionFactor AS PurchaseQty,
+    -- Transfer Out Quantity in the Reporting Unit
+    ISNULL(tout.TransferOutQty, 0) / icf.ReportingConversionFactor AS TransferOutQty,
+    -- Transfer In Quantity in the Reporting Unit
+    ISNULL(tin.TransferInQty, 0) / icf.ReportingConversionFactor AS TransferInQty,
+    -- Waste Quantity in the Reporting Unit
+    ISNULL(waste.WasteQty, 0) / icf.ReportingConversionFactor AS WasteQty,
+    -- Ending Inventory in the Reporting Unit
+    ISNULL(insu_close.QtyOnHand, 0) / icf.ReportingConversionFactor 
+    + ISNULL(insu_close.PreppedQty, 0) / icf.ReportingConversionFactor AS EndInvQty,
+    -- Calculate UsageQty as the difference between expected and recorded ending inventory
+    (ISNULL(insu_open.QtyOnHand, 0) / icf.ReportingConversionFactor 
+    + ISNULL(insu_open.PreppedQty, 0) / icf.ReportingConversionFactor 
+    + ISNULL(ui.InvoiceSum, 0) / icf.ReportingConversionFactor 
+    + ISNULL(tout.TransferOutQty, 0) / icf.ReportingConversionFactor 
+    + ISNULL(tin.TransferInQty, 0) / icf.ReportingConversionFactor 
+    + ISNULL(waste.WasteQty, 0) / icf.ReportingConversionFactor) 
+    - (ISNULL(insu_close.QtyOnHand, 0) / icf.ReportingConversionFactor 
+    + ISNULL(insu_close.PreppedQty, 0) / icf.ReportingConversionFactor) AS UsageQty,
+    -- Calculate Approximate Value based on inventory changes
+    (ISNULL(insu_open.TotalValue, 0) + ISNULL(ui.InvoiceValue, 0) 
+    - ISNULL(insu_close.TotalValue, 0)) AS ApproxValue,
+    -- Ending Inventory Value
+    ISNULL(insu_close.TotalValue, 0) AS EndInvValue
+FROM 
+    oc.Item i
+    -- Join with Category table to fetch Category Name
+    LEFT JOIN oc.[Group] g ON g.GroupId = i.ItemGroup
+    LEFT JOIN oc.Category c ON c.CategoryId = g.Category 
+
+    -- Join with KeyItemDetail table to fetch Primary Location based on the Store
+    LEFT JOIN oc.KeyItemDetail kid ON kid.Item = i.ItemId AND kid.Store = @Store
+    LEFT JOIN oc.Location l ON l.LocationId = kid.PrimaryLocation
+
+    -- Join with Inventory Summary for Opening Inventory
+    LEFT JOIN oc.Inventory inv_open ON inv_open.OpenDate = @StartDate AND inv_open.Store = @Store
+    LEFT JOIN oc.InventorySummary insu_open ON inv_open.InventoryId = insu_open.Inventory 
+    AND insu_open.Item = i.ItemId
+    
+    -- Join with Inventory Summary for Closing Inventory
+    LEFT JOIN oc.Inventory inv_close ON inv_close.CloseDate = @EndDate AND inv_close.Store = @Store
+    LEFT JOIN oc.InventorySummary insu_close ON inv_close.InventoryId = insu_close.Inventory 
+    AND insu_close.Item = i.ItemId
+
+    -- Join with Invoice data for Period Purchases
+    LEFT JOIN (
+        SELECT 
+            ii.Item,
+            i.Store,
+            SUM(ii.StockQty - ISNULL(ir.StockQty, 0)) AS InvoiceSum,  -- Total Quantity Purchased in Period
+            SUM(ii.AdjustedTotal) AS InvoiceValue                     -- Total Purchase Value in Period
+        FROM 
+            oc.InvoiceItem ii
+            JOIN oc.Invoice i ON i.InvoiceId = ii.Invoice 
+            AND i.InvoiceDate BETWEEN @StartDate AND @EndDate
+            LEFT JOIN oc.InvoiceRFC ir ON ii.InvoiceLineId = ir.InvoiceItem
+        WHERE i.Store = @Store
+        GROUP BY ii.Item, i.Store
+    ) AS ui ON ui.Item = i.ItemId
+
+    -- Transfer Out Data
+    LEFT JOIN (
+        SELECT 
+            iu.Item, 
+            SUM(-iu.StockQty) AS TransferOutQty -- Negative values represent transfer out quantities
+        FROM oc.ItemUsage iu
+        JOIN oc.TransferContext tc ON tc.UsageSource = iu.UsageSource
+        JOIN oc.[Transfer] t ON t.Sender = tc.TransferContextId
+        WHERE t.TransferDate BETWEEN @StartDate AND @EndDate AND tc.Store = @Store
+        GROUP BY iu.Item
+    ) AS tout ON tout.Item = i.ItemId
+
+    -- Transfer In Data
+    LEFT JOIN (
+        SELECT 
+            iu.Item, 
+            SUM(-iu.StockQty) AS TransferInQty -- Negative values represent transfer in quantities
+        FROM oc.ItemUsage iu
+        JOIN oc.TransferContext tc ON tc.UsageSource = iu.UsageSource
+        JOIN oc.[Transfer] t ON t.Receiver = tc.TransferContextId
+        WHERE t.TransferDate BETWEEN @StartDate AND @EndDate AND tc.Store = @Store
+        GROUP BY iu.Item
+    ) AS tin ON tin.Item = i.ItemId
+
+    -- Waste Data
+    LEFT JOIN (
+        SELECT 
+            iu.Item, 
+            SUM(-iu.StockQty) AS WasteQty -- Negative values represent waste quantities
+        FROM oc.ItemUsage iu
+        JOIN oc.UsageSource us ON iu.UsageSource = us.UsageSourceId
+        JOIN oc.Waste w ON w.UsageSource = iu.UsageSource
+        WHERE w.WasteDate BETWEEN @StartDate AND @EndDate AND us.Store = @Store
+        GROUP BY iu.Item
+    ) AS waste ON waste.Item = i.ItemId
+
+    -- Join with the Invoice table to fetch the most recent Supplier Name for each item
+    LEFT JOIN (
+        SELECT 
+            ii.Item, 
+            i.Supplier, 
+            s.Name AS SupplierName,
+            ROW_NUMBER() OVER (PARTITION BY ii.Item ORDER BY i.InvoiceDate DESC) AS rn -- Get the latest Supplier
+        FROM oc.InvoiceItem ii
+        JOIN oc.Invoice i ON i.InvoiceId = ii.Invoice
+        JOIN oc.Supplier s ON s.SupplierId = i.Supplier
+        WHERE LEFT(s.Name, 1) NOT LIKE '[0-9]%' -- Exclude suppliers starting with numbers
+    ) AS recentSupplier ON recentSupplier.Item = i.ItemId AND recentSupplier.rn = 1
+
+    LEFT JOIN (
+        SELECT 
+            cs.Item, 
+            cs.OrderCode,
+            cs.Supplier
+        FROM oc.CaseSize cs
+        JOIN oc.Supplier s ON s.SupplierId = cs.Supplier
+        WHERE LEFT(s.Name, 1) NOT LIKE '[0-9]%' -- Filter to exclude Suppliers that start with a number *****
+    ) AS cs ON cs.Item = i.ItemId AND cs.Supplier = recentSupplier.Supplier
+
+    -- Join with Unit of Measure to fetch correct UOM for reporting
+    LEFT JOIN oc.ItemConversionFactor icf ON icf.Item = i.ItemId -- Handles conversion between Pak and Reporting Units
+    LEFT JOIN oc.Uom u ON u.UomId = icf.ReportingUom;           -- Correctly joining the UOM
+
+-- Select the data from the temporary table, apply sorting, and filter out rows with all zero values
+SELECT 
+    ItemDescrip,    -- Item Description
+    ItemId,         -- OC Internal ID
+    Supplier,       -- Supplier Name
+    OrderCode,      -- Vendor Code
+    Category_Name,  -- Category Name
+    Item_Location,  -- Primary Location Name
+    UOM,            -- Unit of Measure
+    OpenInvQty,     -- Opening Inventory
+    PurchaseQty,    -- Period Purchases
+    TransferOutQty, -- Transfer Out Quantity
+    TransferInQty,  -- Transfer In Quantity
+    WasteQty,       -- Waste Quantity
+    EndInvQty,      -- Ending Inventory
+    UsageQty,       -- Actual Usage
+    ApproxValue,    -- Approximate Value
+    EndInvValue     -- Ending Inventory Value
+FROM @UsageSummary
+-- Filter out rows where all quantity columns are zero
+WHERE 
+    (OpenInvQty <> 0 OR PurchaseQty <> 0 OR TransferOutQty <> 0 OR 
+     TransferInQty <> 0 OR WasteQty <> 0 OR EndInvQty <> 0)
+-- Order by Category Name and then by Item Description
+ORDER BY 
+    Category_Name, 
+    ItemDescrip
+    ;
+
+-- Reset transaction isolation level
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET NOCOUNT ON;
