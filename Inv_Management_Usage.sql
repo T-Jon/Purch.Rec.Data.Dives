@@ -26,7 +26,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET NOCOUNT ON;
 
 -- Declare variables to filter the data
-DECLARE @Store SMALLINT = 2;               -- Store identifier for filtering the data
+DECLARE @Store SMALLINT = 2;               -- Store identifier, Please refer to Store ID Values above
 DECLARE @StartDate DATETIME = '2024-08-01'; -- Start date for the reporting period
 DECLARE @EndDate DATETIME = '2024-08-31';   -- End date for the reporting period
 
@@ -53,10 +53,10 @@ DECLARE @UsageSummary TABLE (
 -- Insert data into the temporary table from various inventory and item-related tables
 INSERT INTO @UsageSummary
 SELECT 
-    i.ItemId,                            -- Adjust to correct column name from TOC
+    i.ItemId,
     i.Descrip AS ItemDescrip,
-    si.SupplierName,                     -- Correct this based on actual supplier table column
-    si.OrderCode,                        -- Correct OrderCode column based on actual table
+    si.SupplierName,
+    si.OrderCode,
     c.Name AS Category_Name,
     l.Name AS Item_Location,
     u.Descrip AS UOM,
@@ -89,7 +89,7 @@ FROM
     LEFT JOIN oc.KeyItemDetail kid ON kid.Item = i.ItemId AND kid.Store = @Store
     LEFT JOIN oc.Location l ON l.LocationId = kid.PrimaryLocation
 
--- Supplier Information: Get the most recent OrderCode and Supplier for each item from CaseSize
+-- Supplier Information: Get the most recent OrderCode and Supplier for each item from oc.CaseSize
 LEFT JOIN (
     SELECT
         cs.Item,                                 -- Item identifier from CaseSize
